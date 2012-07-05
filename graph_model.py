@@ -3,17 +3,16 @@ import ast
 from asp.tree_grammar import *
 
 parse('''
-Graph(vertex=VertexType, edge=EdgeType)
+GraphUpdate(body=VarDecl*)
 
-VertexType(members=TypeDecl*)
+VarDecl(name=Identifier, type=types.StringType, initialValue=Constant)
 
-EdgeType(members=TypeDecl*)
+InEdgeIter(body=AccumOp*)
 
-TypeDecl(name=types.StringType, type=types.TypeType, initialValue=Value)
+AccumOp(left=Identifier. op=(ast.Add|ast.Mul)
 
-Value = types.NoneType
-      | types.IntType
-      | types.DoubleType
-      | types.StringType
+Identifier(name)
+
+Constant(value = (types.IntType | types.LongType | types.FloatType))
 
 ''', globals(), checker='GraphModelChecker')
