@@ -3,13 +3,15 @@ import ast
 from asp.tree_grammar import *
 
 parse('''
-GraphUpdate(body=VarDecl*)
+GraphUpdate(body=(GatherNode|ast.Assign)*)
 
-VarDecl(name=Identifier, type=types.StringType, initialValue=Constant)
+GatherNode(total_var=Identifier, map=GatherMap, reduce=GatherReduce)
 
-InEdgeIter(body=AccumOp*)
+GatherMap(var=Identifier, body=(Accessor|ast.BinOp))
 
-AccumOp(left=Identifier. op=(ast.Add|ast.Mul)
+GatherReduce(var1=Identifier, var2=Identifier, body=ast.BinOp)
+
+Accessor(names=Identifier*)
 
 Identifier(name)
 

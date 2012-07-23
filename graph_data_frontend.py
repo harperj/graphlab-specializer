@@ -20,7 +20,7 @@ class GraphDataFrontEnd(ast_tools.NodeTransformer):
 
     def visit_Assign(self, node):
         my_type = node.value.func.attr
-        assert node.value.func.value.id == 'np'
+        assert node.value.func.value.id == 'gl'
         initial_value = ast.literal_eval(node.value.args[0])
         return TypeDecl(node.targets[0].attr, my_type, Value(initial_value))
 
@@ -30,3 +30,11 @@ class GraphDataFrontEnd(ast_tools.NodeTransformer):
 
         return self.visit(node.body[0])
 
+
+class GraphDataTypeExtractor(ast_tools.NodeVisitor):
+    def visit_TypeDecl(self, node):
+        if hasattr(self, 'dtypes'):
+            self.dtypes[node.name] = node.type
+        else:
+            self.dtypes = { node.name: node.type } 
+    
