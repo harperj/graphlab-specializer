@@ -6,11 +6,21 @@ import cgen
 
 class GraphFrontEnd(ast_tools.NodeTransformer):
     def visit_FunctionDef(self, node):
-        visited_body = map(self.visit, node.body)
-        
-        return GraphUpdate(map(self.visit, node.body))
+        visited_body = []
+        for child in node.body:
+            new_node = self.visit(child)
+            if type(new_node) == list:
+                for nn in new_node:
+                    visited_body.append(nn)
+            else:
+                visited_body.append(new_node)
+
+        return GraphUpdate(visited_body)
+
     def visit_Assign(self, node):
-        if type(node.value) == ast.Call and node.value.func.id == 'map_reduce':
+        if type(node.value) == ast.Call \
+           and type(node.value.func) == ast.Attribute \
+           and node.value.func.attr == 'map_reduce':
             assert type(node.value.args[0]) == ast.Lambda
             assert type(node.value.args[1]) == ast.Lambda
             # node.targets[0].id == lhs name
@@ -32,32 +42,58 @@ class GraphFrontEnd(ast_tools.NodeTransformer):
             reduce_var2 = Identifier(reduce_func.args.args[1].id)
             reduce_body = self.visit(reduce_func.body)
             gather_reduce = GatherReduce(reduce_var1, reduce_var2, reduce_body)
-
             return GatherNode(Identifier(node.targets[0].id), gather_map, gather_reduce)
         else: 
             return self.generic_visit(node)
 
-    def visit_Attribute(self, node):
-        child = None
-        if isinstance(node.value, ast.Name):
-            child = Accessor([Identifier(node.value.id)])
-        else:
-            child = self.visit(node.value)
-        child.names.append(Identifier(node.attr))
-        print "Visiting attribute ", node.attr
-        return child
- 
+    def visit_Expr(self, node):
+        return self.visit(node.value) 
+
     def visit_Call(self, node):
-        child = self.visit(node.func)
-        child.names[-1].name += "()"
-        #print "Visiting call.  Child ", child[-1].name, "'s call set to: ", child[-1].call
-        return child
+        #print "Visited call"
+        if type(node.func) == ast.Name \
+           and node.func.id == 'map':
+            assert len(node.args) == 2
+            assert type(node.args[0]) == ast.Lambda
+            return ScatterNode(Identifier(node.args[0].args.args[0].id), self.visit(node.args[0].body))
+        elif type(node.func) == ast.Name \
+             and node.func.id == 'abs':
+             node.func.id = 'std::fabs'
+
+        func = self.visit(node.func)
+        args = map(self.visit, node.args)
+        #print args
+        if type(func) == Identifier:
+            new_node = GraphCall(func.name, args)
+            return Accessor([new_node])
+        elif type(func) == Accessor:
+            func.values[-1] = GraphCall(func.values[-1].name, args)
+            return func
+
+    def visit_If(self, node):
+        #Special case: If statement on scatter
+        #print "ENCOUNTERED IF"
+        #print len(node.body), " ", self.visit(node.body[0].value)
+        #print dir(node.body[0])
+        if (len(node.body) == 1 
+            and type(self.visit(node.body[0].value)) == ScatterNode):
+            #Scatter_edges
+            return [self.visit(node.body[0]), GatherEdges(node)]
+        return self.generic_visit(node)
+            
+    def visit_Attribute(self, node):
+        value = self.visit(node.value)
+        #print value
+        if type(value) == Identifier:
+            return Accessor([value, Identifier(node.attr)])
+        elif type(value) == Accessor:
+            return Accessor(value.values + [Identifier(node.attr)])
 
     def visit_Name(self, node):
         return Identifier(node.id)
 
 
-class GatherTypeDeclConvert(ast_tools.ConvertAST):
+class GatherTypeDeclConvert(ast_tools.ConvertAST):                      
     def __init__(self, vertex_data, edge_data):
         self.vertex_data = vertex_data
         self.edge_data = edge_data
@@ -69,17 +105,18 @@ class GatherTypeDeclConvert(ast_tools.ConvertAST):
     def visit_GatherMap(self, node):
         return self.checkType(node.body)
 
-    def checkType(self, acc_node):
+    def checkType(self, acc_node, is_vertex=False):
         #First we'll want to check if this is a vertex or edge member
-        if isinstance(acc_node, Accessor) and acc_node.names[-1].name[-2:] != "()":
-            if acc_node.names[1].name == "source()" or acc_node.names[1].name == "source":
-                return self.vertex_data[acc_node.names[2].name]
+        if isinstance(acc_node, Accessor) and type(acc_node.values[-1]) != GraphCall:
+            if acc_node.values[1].name == "source()" or acc_node.values[1].name == "source":
+                return self.vertex_data[acc_node.values[2].name]
             else:
-                return self.edge_data[acc_node.names[1].name]
+                return self.edge_data[acc_node.values[1].name]
+
         elif isinstance(acc_node, ast.BinOp):
-            res = self.checkType(acc_node.left)
+            res = self.checkType(acc_node.left, is_vertex)
             if res == None:
-                return self.checkType(acc_node.right)
+                return self.checkType(acc_node.right, is_vertex)
             return res
         else:
             return None
@@ -111,20 +148,116 @@ class GatherReduceOpConvert(ast_tools.ConvertAST):
 
 
 class GatherMapOpConvert(ast_tools.ConvertAST):
+    def __init__(self, vertex_data, edge_data):
+        self.vertex_data = vertex_data
+        self.edge_data = edge_data
+        super(GatherMapOpConvert, self)
+
     def visit_GatherNode(self, node):
         self.anon_var = node.map.var.name
         return self.visit(node.map.body)
+
     def visit_Accessor(self, node):
-        node.names = map(lambda x: x if self.anon_var != x.name else Identifier('edge'), node.names)
-        node_str = reduce(lambda x, y: Identifier(x.name+"."+y.name), node.names)
-        return node_str.name
+        node.values = map(lambda x: x if self.anon_var != x.name else Identifier('edge'), node.values)
+        node_str = reduce(lambda x, y: self.visit(x)+"."+self.visit(y), node.values)
+        return node_str
+
+    def visit_Identifier(self, node):
+        if node.name in self.vertex_data or node.name in self.edge_data:
+            return "data()." + node.name
+        return node.name
+
+    def visit_GraphCall(self, node):
+        node.name += "("
+        if len(node.args) > 0:
+            arg_string = reduce(lambda x, y: self.visit(x)+","+self.visit(y), node.args)
+            node.name += arg_string
+        node.name += ")"
+        return node.name
+
+    def visit_str(self, node):
+        return node
+
+class GatherEdgesConvert(ast_tools.ConvertAST):
+    def visit_GatherEdges(self, node):
+        return_decl = cgen.If(self.visit(node.condition.test), cgen.Statement("return graphlab::ALL_EDGES"), 
+            cgen.Statement("return graphlab::NO_EDGES"))
+        return return_decl
 
 class ApplyConvert(ast_tools.ConvertAST):
-    def __init__(self, gather_vars):
+    def __init__(self, gather_vars, vertex_data, edge_data):
         self.gather_vars = gather_vars
+        self.vertex_data = vertex_data
+        self.edge_data = edge_data
         super(ApplyConvert, self).__init__()
 
+    def visit_Module(self, node):
+        return map(self.visit, node.body)
 
+    def visit_Assign(self, node):
+        return cgen.Statement(self.visit(node.targets[0]) + " = " + self.visit(node.value))
+
+    def visit_BinOp(self, node):
+        #print "binop ", node.left, " ", node.op, " ", node.right
+        return "(" + str(self.visit(node.left)) + self.visit(node.op) + str(self.visit(node.right)) + ")"
+
+
+    def visit_Accessor(self, node):
+        node_str = ".".join([self.visit(x) for x in node.values])
+        return node_str
+
+    def visit_GraphCall(self, node):
+        node_name = ""
+        if node.name in self.gather_vars:
+            node_name = "total." + node.name
+        else: 
+            node_name = node.name
+        node_name += "("
+        node_name += ",".join([self.visit(x) for x in node.args])
+        node_name += ")"
+        return node_name
+
+    def visit_Identifier(self, node):
+        if node.name in self.gather_vars:
+            return "total." + node.name
+        if node.name in self.vertex_data or node.name in self.edge_data:
+            return "data()." + node.name
+        return node.name
+
+    def visit_str(self, node):
+        return node
+
+class ScatterOpConvert(ast_tools.ConvertAST):
+    def visit_ScatterNode(self, node):
+        self.anon_var = node.anon_var
+        return cgen.Statement(self.visit(node.body))
+
+    def visit_Accessor(self, node):
+        #node_str = reduce(lambda x, y: self.visit(x)+"."+self.visit(y), node.values, self.visit(node.values[0]))
+        node_str = ".".join([self.visit(x) for x in node.values])
+        return node_str
+
+    def visit_GraphCall(self, node):
+        node_name = node.name
+        node_name += "("
+        if len(node.args) > 1:
+            #arg_string = reduce(lambda x, y: self.visit(x)+","+self.visit(y), node.args)
+            arg_string = ",".join([self.visit(x) for x in node.args])
+            node_name += arg_string
+        elif len(node.args) == 1:
+            node_name += self.visit(node.args[0])
+        node_name += ")"
+        return node_name
+
+    def visit_Identifier(self, node):
+        if node.name == self.anon_var.name:
+            return "edge"
+        elif node.name == "self":
+            return "context"
+        return node.name
+
+    def visit_str(self, node):
+        return node
 
 class GraphConvert(ast_tools.ConvertAST):
     def __init__(self, vertex_data, edge_data):
